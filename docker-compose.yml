@@ -33,6 +33,9 @@ services:
       DATABASE_URL: postgres://amrutam:amrutam@postgres:5432/amrutam
       REDIS_URL: redis://redis:6379
       NODE_ENV: production
+      STORAGE_DIR: /app/storage
+    volumes:
+      - rxfiles:/app/storage
     ports:
       - "3000:3000"
     depends_on:
@@ -42,6 +45,47 @@ services:
         condition: service_healthy
     command: sh -c "node scripts/migrate.js && node src/server.js"
 
+  worker:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://amrutam:amrutam@postgres:5432/amrutam
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: production
+      STORAGE_DIR: /app/storage
+    volumes:
+      - rxfiles:/app/storage
+    depends_on:
+      api:
+        condition: service_started
+    command: ["node", "src/worker.js"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9464/health || exit 1"]
+      interval: 15s
+
+  # docker compose --profile observability up
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: [observability]
+    volumes:
+      - ./infra/prometheus:/etc/prometheus:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: [observability]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/etc/grafana/dashboards:ro
+    ports:
+      - "3001:3000"
+    depends_on: [prometheus]
+
 volumes:
+  rxfiles:
   pgdata:
   redisdata:

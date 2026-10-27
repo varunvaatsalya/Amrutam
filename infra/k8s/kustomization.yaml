@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: amrutam
+resources:
+  - namespace.yaml
+  - config.yaml
+  - migrate-job.yaml
+  - api.yaml
+  - worker.yaml
+images:
+  - name: amrutam-api
+    newName: ghcr.io/amrutam/telemed-api   # set by CI
+    newTag: latest

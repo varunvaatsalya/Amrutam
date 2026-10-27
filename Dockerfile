@@ -11,6 +11,8 @@ COPY package.json ./
 COPY src ./src
 COPY scripts ./scripts
 COPY migrations ./migrations
+COPY docs/openapi.yaml ./docs/openapi.yaml
+RUN mkdir -p /app/storage && chown node:node /app/storage
 
 USER node
 EXPOSE 3000

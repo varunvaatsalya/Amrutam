@@ -1,0 +1,42 @@
+groups:
+  - name: slo
+    rules:
+      - alert: ReadLatencyHigh
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{method="GET"}[5m]))) > 0.2
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: p95 read latency above 200ms SLO
+
+      - alert: WriteLatencyHigh
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{method=~"POST|PATCH|DELETE"}[5m]))) > 0.5
+        for: 10m
+        labels: { severity: page }
+        annotations:
+          summary: p95 write latency above 500ms SLO
+
+      - alert: ErrorRateHigh
+        # 99.95% availability leaves ~0.05% error budget
+        expr: |
+          sum(rate(http_request_duration_seconds_count{status=~"5.."}[5m]))
+            / sum(rate(http_request_duration_seconds_count[5m])) > 0.005
+        for: 5m
+        labels: { severity: page }
+        annotations:
+          summary: 5xx rate above 0.5% - burning error budget fast
+
+      - alert: JobsFailing
+        expr: sum by (name) (rate(jobs_processed_total{result="error"}[10m])) > 0.1
+        for: 10m
+        labels: { severity: ticket }
+        annotations:
+          summary: "background job {{ $labels.name }} keeps failing"
+
+      - alert: DbPoolSaturated
+        expr: max(db_pool_connections{state="waiting"}) > 5
+        for: 5m
+        labels: { severity: ticket }
+        annotations:
+          summary: requests are queueing for postgres connections

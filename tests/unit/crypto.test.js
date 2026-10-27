@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const crypto = require('crypto');
-const { createCipher } = require('../src/lib/crypto');
+const { createCipher } = require('../../src/lib/crypto');
 
 const k1 = crypto.randomBytes(32).toString('base64');
 const k2 = crypto.randomBytes(32).toString('base64');

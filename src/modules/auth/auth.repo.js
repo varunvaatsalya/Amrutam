@@ -34,6 +34,14 @@ function createAuthRepo(db) {
       );
     },
 
+    async setMfaSecret(userId, secretEnc) {
+      await db.query('UPDATE users SET mfa_secret_enc = $2 WHERE id = $1', [userId, secretEnc]);
+    },
+
+    async enableMfa(userId) {
+      await db.query('UPDATE users SET mfa_enabled = true WHERE id = $1', [userId]);
+    },
+
     async touchLastLogin(userId) {
       await db.query('UPDATE users SET last_login_at = now() WHERE id = $1', [userId]);
     },

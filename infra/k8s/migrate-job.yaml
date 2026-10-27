@@ -1,0 +1,18 @@
+# run before rolling out a new api version (CI applies it and waits for completion)
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: amrutam-migrate
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: amrutam-api
+          command: ["node", "scripts/migrate.js"]
+          envFrom:
+            - configMapRef: { name: amrutam-config }
+            - secretRef: { name: amrutam-secrets }

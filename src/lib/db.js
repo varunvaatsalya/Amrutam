@@ -1,4 +1,10 @@
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+const { dbDuration, trackDbPool } = require('./metrics');
+
+// DATE columns stay 'YYYY-MM-DD' - turning them into JS Dates shifts them by the server tz
+types.setTypeParser(types.builtins.DATE, (v) => v);
+
+const SLOW_QUERY_MS = 200;
 
 function createDb({ url, poolMax }, logger) {
   const pool = new Pool({
@@ -10,9 +16,17 @@ function createDb({ url, poolMax }, logger) {
   });
 
   pool.on('error', (err) => logger.error({ err }, 'pg pool error'));
+  trackDbPool(pool);
 
   async function query(text, params) {
-    return pool.query(text, params);
+    const start = process.hrtime.bigint();
+    try {
+      return await pool.query(text, params);
+    } finally {
+      const ms = Number(process.hrtime.bigint() - start) / 1e6;
+      dbDuration.observe(ms / 1000);
+      if (ms > SLOW_QUERY_MS) logger.warn({ ms: Math.round(ms), sql: text.replace(/\s+/g, ' ').slice(0, 200) }, 'slow query');
+    }
   }
 
   // runs fn inside BEGIN/COMMIT, rolls back on any throw

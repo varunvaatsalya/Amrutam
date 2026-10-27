@@ -1,0 +1,687 @@
+openapi: 3.1.0
+info:
+  title: Amrutam Telemedicine API
+  version: 1.0.0
+  description: |
+    Doctor discovery, slot booking, consultations and prescriptions.
+
+    * All bodies are JSON. Errors look like `{"error": {"code", "message", "details?"}}`.
+    * Writes that move money or book things require an `Idempotency-Key` header
+      (8-100 chars). Same key + same body replays the stored response
+      (`Idempotent-Replayed: true`), same key + different body returns 422.
+    * Every response carries `x-request-id` and a W3C `traceparent`.
+    * Rate limits: 120 req/min per user (or IP), 10 req/min per IP on auth endpoints.
+servers:
+  - url: http://localhost:3000/api/v1
+
+tags:
+  - name: auth
+  - name: doctors
+  - name: bookings
+  - name: payments
+  - name: consultations
+  - name: admin
+
+components:
+  securitySchemes:
+    bearer: { type: http, scheme: bearer, bearerFormat: JWT }
+    webhookSignature:
+      type: apiKey
+      in: header
+      name: x-mockpay-signature
+      description: "`sha256=<hex HMAC-SHA256 of raw body with PAYMENT_WEBHOOK_SECRET>`"
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, pattern: '^[A-Za-z0-9_-]{8,100}$' }
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Cursor:
+      name: cursor
+      in: query
+      schema: { type: string }
+      description: opaque, from `nextCursor` of the previous page
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+
+  responses:
+    Error:
+      description: error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, examples: [BAD_REQUEST, SLOT_UNAVAILABLE, IDEMPOTENCY_KEY_REUSED] }
+            message: { type: string }
+            details: {}
+    Tokens:
+      type: object
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        tokenType: { type: string, const: Bearer }
+    Doctor:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        fullName: { type: string }
+        city: { type: [string, 'null'] }
+        specialization: { type: string }
+        languages: { type: array, items: { type: string } }
+        experienceYears: { type: integer }
+        feeInr: { type: number }
+        bio: { type: [string, 'null'] }
+        rating: { type: number }
+        ratingCount: { type: integer }
+        verified: { type: boolean }
+    Slot:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        status: { type: string, enum: [open, held, booked, blocked] }
+    Consultation:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, confirmed, in_progress, completed, cancelled, no_show] }
+        scheduledAt: { type: string, format: date-time }
+        patientId: { type: string, format: uuid }
+        doctorId: { type: string, format: uuid }
+        slotId: { type: string, format: uuid }
+        reason: { type: string, description: PHI - only on single-item reads }
+        doctorNotes: { type: string, description: PHI - only on single-item reads }
+        meetingUrl: { type: string, description: only while confirmed / in_progress }
+        cancelReason: { type: string }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: string, format: date-time }
+    Payment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        consultationId: { type: string, format: uuid }
+        amountInr: { type: number }
+        currency: { type: string }
+        status: { type: string, enum: [created, succeeded, failed, refunded] }
+        failureReason: { type: string }
+    Medication:
+      type: object
+      required: [name, dosage, frequency, durationDays]
+      properties:
+        name: { type: string }
+        dosage: { type: string, examples: ['1 tsp'] }
+        frequency: { type: string, examples: ['twice a day'] }
+        durationDays: { type: integer, minimum: 1 }
+        instructions: { type: string }
+    Prescription:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        consultationId: { type: string, format: uuid }
+        medications: { type: array, items: { $ref: '#/components/schemas/Medication' } }
+        advice: { type: string }
+        pdfReady: { type: boolean }
+
+paths:
+  /auth/register:
+    post:
+      tags: [auth]
+      security: []
+      summary: Register a patient or doctor (doctors start unverified)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role, email, password, fullName]
+              properties:
+                role: { type: string, enum: [patient, doctor] }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 10, description: at least one letter and one digit }
+                fullName: { type: string }
+                phone: { type: string, pattern: '^\+?\d{10,14}$' }
+                doctor:
+                  type: object
+                  description: required when role=doctor
+                  required: [registrationNo, specialization, feeInr]
+                  properties:
+                    registrationNo: { type: string }
+                    specialization: { type: string }
+                    languages: { type: array, items: { type: string } }
+                    experienceYears: { type: integer }
+                    feeInr: { type: integer }
+                    bio: { type: string }
+      responses:
+        '201': { description: created }
+        '400': { $ref: '#/components/responses/Error' }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      security: []
+      summary: Log in. 401 with details.mfaRequired=true when a TOTP code is needed.
+      description: 5 failed attempts lock the account for 15 minutes (423).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                mfaCode: { type: string, pattern: '^\d{6}$' }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Tokens'
+                  - type: object
+                    properties:
+                      mfaSetupRequired: { type: boolean, description: true for staff without MFA }
+        '401': { $ref: '#/components/responses/Error' }
+        '423': { $ref: '#/components/responses/Error' }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      security: []
+      summary: Rotate refresh token. Reusing a spent token revokes the whole session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [refreshToken], properties: { refreshToken: { type: string } } }
+      responses:
+        '200': { description: new pair, content: { application/json: { schema: { $ref: '#/components/schemas/Tokens' } } } }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      security: []
+      summary: Revoke the session the refresh token belongs to
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [refreshToken], properties: { refreshToken: { type: string } } }
+      responses:
+        '204': { description: logged out }
+
+  /auth/mfa/setup:
+    post:
+      tags: [auth]
+      security: [{ bearer: [] }]
+      summary: Generate a TOTP secret (shown once)
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { type: object, properties: { secret: { type: string }, otpauthUrl: { type: string } } }
+
+  /auth/mfa/enable:
+    post:
+      tags: [auth]
+      security: [{ bearer: [] }]
+      summary: Confirm a code and turn MFA on. Log in again to get an MFA-backed token.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [code], properties: { code: { type: string, pattern: '^\d{6}$' } } }
+      responses:
+        '200': { description: enabled }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /auth/me:
+    get:
+      tags: [auth]
+      security: [{ bearer: [] }]
+      summary: Current user and profile
+      responses:
+        '200': { description: current user + profile }
+
+  /users/me:
+    patch:
+      tags: [auth]
+      security: [{ bearer: [] }]
+      summary: Update own profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                fullName: { type: string }
+                phone: { type: string }
+                dateOfBirth: { type: string, format: date }
+                gender: { type: string, enum: [male, female, other] }
+                city: { type: string }
+      responses:
+        '200': { description: updated profile }
+
+  /doctors:
+    get:
+      tags: [doctors]
+      security: []
+      summary: Search verified doctors (cached 60s)
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: "name or specialization (min 2 chars)" }
+        - { name: specialization, in: query, schema: { type: string } }
+        - { name: language, in: query, schema: { type: string } }
+        - { name: city, in: query, schema: { type: string } }
+        - { name: minFee, in: query, schema: { type: integer } }
+        - { name: maxFee, in: query, schema: { type: integer } }
+        - { name: minRating, in: query, schema: { type: number } }
+        - { name: availableOn, in: query, schema: { type: string, format: date }, description: has an open slot on this IST date }
+        - { name: sort, in: query, schema: { type: string, enum: [rating, fee, experience], default: rating } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: page of doctors
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { type: array, items: { $ref: '#/components/schemas/Doctor' } }
+                  nextCursor: { type: [string, 'null'] }
+
+  /doctors/{id}:
+    get:
+      tags: [doctors]
+      security: []
+      summary: Public doctor profile
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Doctor' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /doctors/{id}/slots:
+    get:
+      tags: [doctors]
+      security: []
+      summary: Open slots between two IST dates (default next 7 days, max 31)
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { type: object, properties: { data: { type: array, items: { $ref: '#/components/schemas/Slot' } } } }
+
+  /doctors/me:
+    patch:
+      tags: [doctors]
+      security: [{ bearer: [] }]
+      summary: Doctor updates own profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                specialization: { type: string }
+                languages: { type: array, items: { type: string } }
+                experienceYears: { type: integer }
+                feeInr: { type: integer }
+                bio: { type: string }
+      responses:
+        '200': { description: updated }
+
+  /doctors/me/slots:
+    get:
+      tags: [doctors]
+      security: [{ bearer: [] }]
+      summary: Doctor's own calendar, all statuses
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        '200': { description: ok }
+    post:
+      tags: [doctors]
+      security: [{ bearer: [] }]
+      summary: Add slots - explicit list or generated from a range. Overlaps are rejected (409 SLOT_OVERLAP).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [slots]
+                  properties:
+                    slots:
+                      type: array
+                      maxItems: 200
+                      items:
+                        type: object
+                        required: [startsAt, endsAt]
+                        properties:
+                          startsAt: { type: string, format: date-time }
+                          endsAt: { type: string, format: date-time }
+                - type: object
+                  required: [generate]
+                  properties:
+                    generate:
+                      type: object
+                      required: [from, to, durationMinutes]
+                      properties:
+                        from: { type: string, format: date-time }
+                        to: { type: string, format: date-time }
+                        durationMinutes: { type: integer, minimum: 10, maximum: 120 }
+      responses:
+        '201': { description: created }
+        '409': { $ref: '#/components/responses/Error' }
+
+  /doctors/me/slots/{slotId}:
+    delete:
+      tags: [doctors]
+      security: [{ bearer: [] }]
+      summary: Block an open slot
+      parameters:
+        - { name: slotId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: blocked }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /bookings:
+    post:
+      tags: [bookings]
+      security: [{ bearer: [] }]
+      summary: Hold a slot and create a pending consultation + payment
+      description: |
+        The slot is held for BOOKING_HOLD_MINUTES (default 10). If the payment
+        doesn't succeed in that window the booking is cancelled and the slot reopens.
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slotId]
+              properties:
+                slotId: { type: string, format: uuid }
+                reason: { type: string, maxLength: 1000 }
+      responses:
+        '201':
+          description: held
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  consultation: { $ref: '#/components/schemas/Consultation' }
+                  payment:
+                    allOf:
+                      - $ref: '#/components/schemas/Payment'
+                      - type: object
+                        properties: { payUrl: { type: string } }
+                  holdExpiresAt: { type: string, format: date-time }
+        '409': { description: 'SLOT_UNAVAILABLE / SLOT_BUSY / SLOT_TOO_SOON / REQUEST_IN_PROGRESS' }
+        '422': { description: IDEMPOTENCY_KEY_REUSED }
+
+  /payments/{id}:
+    get:
+      tags: [payments]
+      security: [{ bearer: [] }]
+      summary: Payment status (owner only)
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Payment' } } } }
+
+  /payments/{id}/mock-pay:
+    post:
+      tags: [payments]
+      security: [{ bearer: [] }]
+      summary: Demo stand-in for the gateway checkout page
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { outcome: { type: string, enum: [success, failure], default: success } } }
+      responses:
+        '200': { description: settled, content: { application/json: { schema: { $ref: '#/components/schemas/Payment' } } } }
+
+  /payments/webhook:
+    post:
+      tags: [payments]
+      security: [{ webhookSignature: [] }]
+      summary: Gateway callback. Replays are no-ops.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [eventId, paymentId, status, providerRef]
+              properties:
+                eventId: { type: string }
+                paymentId: { type: string, format: uuid }
+                status: { type: string, enum: [succeeded, failed] }
+                providerRef: { type: string }
+                failureReason: { type: string }
+      responses:
+        '200': { description: 'ok - {received: true, duplicate: bool}' }
+        '401': { description: bad signature }
+
+  /consultations:
+    get:
+      tags: [consultations]
+      security: [{ bearer: [] }]
+      summary: Own consultations (patient or doctor), newest first. No PHI in list view.
+      parameters:
+        - { name: status, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: page }
+
+  /consultations/{id}:
+    get:
+      tags: [consultations]
+      security: [{ bearer: [] }]
+      summary: Participant or admin only (others get 404). Read is audit-logged.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Consultation' } } } }
+        '404': { $ref: '#/components/responses/Error' }
+
+  /consultations/{id}/start:
+    post:
+      tags: [consultations]
+      security: [{ bearer: [] }]
+      summary: Doctor - confirmed -> in_progress (at most 10 min early)
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: ok }
+        '409': { description: INVALID_STATE_TRANSITION / TOO_EARLY }
+
+  /consultations/{id}/complete:
+    post:
+      tags: [consultations]
+      security: [{ bearer: [] }]
+      summary: Doctor - in_progress -> completed
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { notes: { type: string } } }
+      responses:
+        '200': { description: ok }
+
+  /consultations/{id}/no-show:
+    post:
+      tags: [consultations]
+      security: [{ bearer: [] }]
+      summary: Doctor - confirmed -> no_show, 15+ min after start
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: ok }
+
+  /consultations/{id}/cancel:
+    post:
+      tags: [consultations]
+      security: [{ bearer: [] }]
+      summary: Patient or doctor cancels before start
+      description: |
+        Refund if the doctor cancels, or the patient cancels 2h+ before start.
+        Doctor cancellations block the slot; patient cancellations reopen it.
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { reason: { type: string } } }
+      responses:
+        '200': { description: 'cancelled, with refundInitiated: bool' }
+
+  /consultations/{id}/prescription:
+    post:
+      tags: [consultations]
+      security: [{ bearer: [] }]
+      summary: Doctor writes the prescription (needs an MFA login). PDF is rendered async.
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [medications]
+              properties:
+                medications: { type: array, minItems: 1, items: { $ref: '#/components/schemas/Medication' } }
+                advice: { type: string }
+      responses:
+        '201': { description: created, content: { application/json: { schema: { $ref: '#/components/schemas/Prescription' } } } }
+        '403': { description: MFA_REQUIRED }
+        '409': { description: PRESCRIPTION_EXISTS / INVALID_STATE }
+    get:
+      tags: [consultations]
+      security: [{ bearer: [] }]
+      summary: Prescription of a consultation (participants only, audit-logged)
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: ok, content: { application/json: { schema: { $ref: '#/components/schemas/Prescription' } } } }
+
+  /prescriptions:
+    get:
+      tags: [consultations]
+      security: [{ bearer: [] }]
+      summary: Patient's prescriptions
+      responses:
+        '200': { description: ok }
+
+  /prescriptions/{id}/pdf:
+    get:
+      tags: [consultations]
+      security: [{ bearer: [] }]
+      summary: Download prescription PDF
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      responses:
+        '200': { description: PDF file, content: { application/pdf: {} } }
+        '409': { description: PDF_NOT_READY }
+
+  /admin/doctors/{id}/verification:
+    patch:
+      tags: [admin]
+      security: [{ bearer: [] }]
+      summary: Verify / unverify a doctor
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [verified], properties: { verified: { type: boolean } } }
+      responses:
+        '200': { description: ok }
+
+  /admin/users/{id}/status:
+    patch:
+      tags: [admin]
+      security: [{ bearer: [] }]
+      summary: Suspend / reactivate a user. Suspension revokes refresh tokens.
+      parameters: [{ $ref: '#/components/parameters/Id' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [status], properties: { status: { type: string, enum: [active, suspended] } } }
+      responses:
+        '200': { description: ok }
+
+  /admin/analytics/summary:
+    get:
+      tags: [admin]
+      security: [{ bearer: [] }]
+      summary: Totals, daily series and top doctors from the 15-min rollup
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        '200': { description: ok }
+
+  /admin/analytics/live:
+    get:
+      tags: [admin]
+      security: [{ bearer: [] }]
+      summary: Today's consultations by status, real time
+      responses:
+        '200': { description: ok }
+
+  /admin/audit-logs:
+    get:
+      tags: [admin]
+      security: [{ bearer: [] }]
+      summary: Search the compliance audit trail
+      parameters:
+        - { name: actorId, in: query, schema: { type: string, format: uuid } }
+        - { name: action, in: query, schema: { type: string } }
+        - { name: resourceType, in: query, schema: { type: string } }
+        - { name: resourceId, in: query, schema: { type: string } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: limit, in: query, schema: { type: integer, maximum: 200, default: 50 } }
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200': { description: page of audit entries }

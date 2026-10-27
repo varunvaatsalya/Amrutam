@@ -1,0 +1,16 @@
+# Non-secret config. Secrets (DATABASE_URL, JWT_ACCESS_SECRET, ENCRYPTION_KEYS,
+# PAYMENT_WEBHOOK_SECRET) come from a Secret named amrutam-secrets, synced from
+# the cloud secret manager by external-secrets - never committed here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: amrutam-config
+data:
+  NODE_ENV: production
+  LOG_LEVEL: info
+  REDIS_URL: redis://amrutam-redis:6379
+  DB_POOL_MAX: "15"
+  ENCRYPTION_ACTIVE_KEY: k1
+  BOOKING_HOLD_MINUTES: "10"
+  REQUIRE_STAFF_MFA: "true"
+  STORAGE_DIR: /app/storage

@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { sha256, randomToken } = require('../../lib/crypto');
+const totp = require('../../lib/totp');
 const { conflict, unauthorized, AppError, notFound } = require('../../lib/errors');
 
 const BCRYPT_ROUNDS = 11;
@@ -12,7 +13,7 @@ const DUMMY_HASH = bcrypt.hashSync('not-a-real-password-123', BCRYPT_ROUNDS);
 
 function createAuthService({ db, redis, config, cipher, authRepo, auditService }) {
   function signAccessToken(user) {
-    return jwt.sign({ role: user.role }, config.jwt.accessSecret, {
+    return jwt.sign({ role: user.role, mfa: user.mfa_enabled }, config.jwt.accessSecret, {
       subject: user.id,
       expiresIn: config.jwt.accessTtl,
       issuer: 'amrutam-api',
@@ -77,7 +78,7 @@ function createAuthService({ db, redis, config, cipher, authRepo, auditService }
 
     if (user.mfa_enabled) {
       if (!mfaCode) throw unauthorized('MFA code required', { mfaRequired: true });
-      if (!verifyMfa(user, mfaCode)) {
+      if (!(await verifyMfa(user, mfaCode))) {
         await redis.multi().incr(failKey).expire(failKey, LOCKOUT_SEC).exec().catch(() => {});
         throw unauthorized('Invalid MFA code', { mfaRequired: true });
       }
@@ -96,9 +97,33 @@ function createAuthService({ db, redis, config, cipher, authRepo, auditService }
     };
   }
 
-  // placeholder until TOTP lands - MFA is never enabled before that
-  function verifyMfa() {
-    return false;
+  async function verifyMfa(user, code) {
+    const secret = cipher.decrypt(user.mfa_secret_enc);
+    if (!secret || !totp.verify(secret, code)) return false;
+    // a code is valid for ~90s (window of 1); don't let the same one be used twice
+    const fresh = await redis.set(`mfa_used:${user.id}:${code}`, '1', 'EX', 90, 'NX').catch(() => 'OK');
+    return fresh === 'OK';
+  }
+
+  async function setupMfa(userId) {
+    const user = await authRepo.findUserById(userId);
+    if (!user) throw notFound('User');
+    if (user.mfa_enabled) throw conflict('MFA is already enabled');
+
+    const secret = totp.generateSecret();
+    await authRepo.setMfaSecret(userId, cipher.encrypt(secret));
+    return { secret, otpauthUrl: totp.otpauthUrl(secret, user.email) };
+  }
+
+  async function enableMfa(userId, code, ctx) {
+    const user = await authRepo.findUserById(userId);
+    if (!user?.mfa_secret_enc) throw conflict('Call /auth/mfa/setup first', 'MFA_NOT_SETUP');
+    if (user.mfa_enabled) throw conflict('MFA is already enabled');
+    if (!(await verifyMfa(user, code))) throw unauthorized('Invalid MFA code');
+
+    await authRepo.enableMfa(userId);
+    await auditService.record({ ...ctx, action: 'auth.mfa_enabled', resourceType: 'user', resourceId: userId });
+    return { mfaEnabled: true };
   }
 
   async function refresh(refreshToken, ctx) {
@@ -150,7 +175,7 @@ function createAuthService({ db, redis, config, cipher, authRepo, auditService }
     };
   }
 
-  return { register, login, refresh, logout, me, verifyMfa, signAccessToken };
+  return { register, login, refresh, logout, me, setupMfa, enableMfa, signAccessToken };
 }
 
 module.exports = { createAuthService };

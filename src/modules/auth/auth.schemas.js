@@ -41,4 +41,6 @@ const login = z.object({
 
 const refresh = z.object({ refreshToken: z.string().min(20).max(200) });
 
-module.exports = { register, login, refresh };
+const mfaCode = z.object({ code: z.string().regex(/^\d{6}$/) });
+
+module.exports = { register, login, refresh, mfaCode };

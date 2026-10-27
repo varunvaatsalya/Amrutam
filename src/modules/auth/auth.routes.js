@@ -23,6 +23,14 @@ function authRoutes({ authService, authenticate, strictLimiter }) {
     res.status(204).end();
   });
 
+  r.post('/mfa/setup', authenticate, async (req, res) => {
+    res.json(await authService.setupMfa(req.user.id));
+  });
+
+  r.post('/mfa/enable', authenticate, strictLimiter, validate({ body: schemas.mfaCode }), async (req, res) => {
+    res.json(await authService.enableMfa(req.user.id, req.valid.body.code, req.auditCtx()));
+  });
+
   r.get('/me', authenticate, async (req, res) => {
     res.json(await authService.me(req.user.id));
   });

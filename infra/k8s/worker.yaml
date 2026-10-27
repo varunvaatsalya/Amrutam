@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: amrutam-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: amrutam-worker }
+  template:
+    metadata:
+      labels: { app: amrutam-worker }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9464"
+    spec:
+      # worker.close() waits for in-flight jobs
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: worker
+          image: amrutam-api
+          command: ["node", "src/worker.js"]
+          envFrom:
+            - configMapRef: { name: amrutam-config }
+            - secretRef: { name: amrutam-secrets }
+          livenessProbe:
+            httpGet: { path: /health, port: 9464 }
+            periodSeconds: 15
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          # prescription PDFs - in prod this is S3 and the volume goes away
+          volumeMounts:
+            - { name: storage, mountPath: /app/storage }
+      volumes:
+        - name: storage
+          emptyDir: {}

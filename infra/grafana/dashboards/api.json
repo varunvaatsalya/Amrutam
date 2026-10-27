@@ -1,0 +1,42 @@
+{
+  "title": "Amrutam API",
+  "uid": "amrutam-api",
+  "schemaVersion": 39,
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "timeseries", "title": "p95 latency by route", "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [{ "datasource": { "uid": "prom" }, "legendFormat": "{{method}} {{route}}",
+        "expr": "histogram_quantile(0.95, sum by (le, method, route) (rate(http_request_duration_seconds_bucket{route!=\"unmatched\"}[5m])))" }]
+    },
+    {
+      "type": "timeseries", "title": "Requests/s by status", "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [{ "datasource": { "uid": "prom" }, "legendFormat": "{{status}}",
+        "expr": "sum by (status) (rate(http_request_duration_seconds_count[1m]))" }]
+    },
+    {
+      "type": "timeseries", "title": "Bookings by outcome", "gridPos": { "x": 0, "y": 8, "w": 8, "h": 8 },
+      "targets": [{ "datasource": { "uid": "prom" }, "legendFormat": "{{outcome}}",
+        "expr": "sum by (outcome) (increase(bookings_total[5m]))" }]
+    },
+    {
+      "type": "timeseries", "title": "Payments settled", "gridPos": { "x": 8, "y": 8, "w": 8, "h": 8 },
+      "targets": [{ "datasource": { "uid": "prom" }, "legendFormat": "{{status}}",
+        "expr": "sum by (status) (increase(payments_settled_total[5m]))" }]
+    },
+    {
+      "type": "timeseries", "title": "Jobs by result", "gridPos": { "x": 16, "y": 8, "w": 8, "h": 8 },
+      "targets": [{ "datasource": { "uid": "prom" }, "legendFormat": "{{name}} {{result}}",
+        "expr": "sum by (name, result) (increase(jobs_processed_total[5m]))" }]
+    },
+    {
+      "type": "timeseries", "title": "DB pool + query p95", "gridPos": { "x": 0, "y": 16, "w": 24, "h": 7 },
+      "targets": [
+        { "datasource": { "uid": "prom" }, "legendFormat": "pool {{state}}", "expr": "sum by (state) (db_pool_connections)" },
+        { "datasource": { "uid": "prom" }, "legendFormat": "query p95 (s)", "expr": "histogram_quantile(0.95, sum by (le) (rate(db_query_duration_seconds_bucket[5m])))" }
+      ]
+    }
+  ]
+}

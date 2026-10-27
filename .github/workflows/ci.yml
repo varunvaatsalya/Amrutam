@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: amrutam
+          POSTGRES_PASSWORD: amrutam
+          POSTGRES_DB: amrutam
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U amrutam" --health-interval 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://amrutam:amrutam@localhost:5432/amrutam
+      REDIS_URL: redis://localhost:6379
+      # throwaway values, only valid inside this job
+      JWT_ACCESS_SECRET: ci-only-secret-ci-only-secret-ci-only-secret
+      ENCRYPTION_KEYS: k1:MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+      ENCRYPTION_ACTIVE_KEY: k1
+      PAYMENT_WEBHOOK_SECRET: ci-webhook-secret-123
+      AUTH_RATE_LIMIT_MAX: "1000"
+      LOG_LEVEL: warn
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: syntax check
+        run: find src scripts -name '*.js' -print0 | xargs -0 -n1 node --check
+      - run: npm test
+      - run: npm run migrate
+      - run: npm run test:integration
+      - name: dependency audit
+        run: npm audit --omit=dev --audit-level=high
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build image
+        run: docker build -t amrutam-api:${{ github.sha }} .
+      - name: scan image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: amrutam-api:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      # pushing to a registry + deploy (kubectl apply -k infra/k8s) would go here,
+      # gated on main, once a cluster/registry exists

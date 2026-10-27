@@ -14,6 +14,12 @@ const schema = z.object({
   ENCRYPTION_ACTIVE_KEY: z.string(),
   RATE_LIMIT_WINDOW_SEC: z.coerce.number().default(60),
   RATE_LIMIT_MAX: z.coerce.number().default(120),
+  AUTH_RATE_LIMIT_MAX: z.coerce.number().default(10),
+  REQUIRE_STAFF_MFA: z.enum(['true', 'false']).default('true'),
+  PAYMENT_WEBHOOK_SECRET: z.string().min(16),
+  BOOKING_HOLD_MINUTES: z.coerce.number().default(10),
+  STORAGE_DIR: z.string().default('./storage'),
+  METRICS_TOKEN: z.string().optional(),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -38,5 +44,10 @@ module.exports = {
     refreshTtlDays: env.REFRESH_TOKEN_TTL_DAYS,
   },
   encryption: { keys: env.ENCRYPTION_KEYS, activeKey: env.ENCRYPTION_ACTIVE_KEY },
-  rateLimit: { windowSec: env.RATE_LIMIT_WINDOW_SEC, max: env.RATE_LIMIT_MAX },
+  rateLimit: { windowSec: env.RATE_LIMIT_WINDOW_SEC, max: env.RATE_LIMIT_MAX, authMax: env.AUTH_RATE_LIMIT_MAX },
+  requireStaffMfa: env.REQUIRE_STAFF_MFA === 'true',
+  payments: { webhookSecret: env.PAYMENT_WEBHOOK_SECRET },
+  booking: { holdMinutes: env.BOOKING_HOLD_MINUTES },
+  storageDir: env.STORAGE_DIR,
+  metricsToken: env.METRICS_TOKEN,
 };
